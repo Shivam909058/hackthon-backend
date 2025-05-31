@@ -1,52 +1,74 @@
-const { exec } = require('child_process');
 const dotenv = require('dotenv');
-const fs = require('fs');
-const path = require('path');
+const { Memory } = require('mem0ai');
 
 dotenv.config();
 
 console.log('Setting up memory system for VoiceChat AI...');
 
-// Check if Docker is installed
-exec('docker -v', (error) => {
-  if (error) {
-    console.error('Docker is required but not installed. Please install Docker first.');
-    console.error('Visit https://docs.docker.com/get-docker/ for installation instructions.');
-    process.exit(1);
-  }
-  
-  console.log('Docker is installed. Proceeding with Qdrant setup...');
-  
-  // Create storage directory for Qdrant
-  const qdrantStoragePath = path.join(__dirname, 'qdrant_storage');
-  if (!fs.existsSync(qdrantStoragePath)) {
-    fs.mkdirSync(qdrantStoragePath, { recursive: true });
-    console.log(`Created Qdrant storage directory at ${qdrantStoragePath}`);
-  }
-  
-  // Check if Qdrant is already running
-  exec('docker ps | grep qdrant', (error, stdout) => {
-    if (stdout && stdout.includes('qdrant/qdrant')) {
-      console.log('Qdrant is already running. You can use the existing instance.');
-      console.log('Setup complete! Your memory system is ready to use.');
-      return;
+async function setupMemory() {
+  try {
+    // Check for required environment variables
+    const requiredVars = [
+      'PINECONE_API_KEY',
+      'PINECONE_ENVIRONMENT',
+      'PINECONE_INDEX',
+      'OPENAI_API_KEY'
+    ];
+    
+    const missingVars = requiredVars.filter(varName => !process.env[varName]);
+    
+    if (missingVars.length > 0) {
+      console.error('Error: Missing required environment variables:');
+      missingVars.forEach(varName => {
+        console.error(`- ${varName}`);
+      });
+      console.error('\nPlease add these to your .env file and try again.');
+      process.exit(1);
     }
     
-    // Start Qdrant container
-    const command = `docker run -d -p 6333:6333 -p 6334:6334 -v ${qdrantStoragePath}:/qdrant/storage:z --name voicechat-qdrant qdrant/qdrant`;
+    console.log('Environment variables found. Testing Pinecone connection...');
     
-    exec(command, (error, stdout) => {
-      if (error) {
-        console.error('Error starting Qdrant container:', error.message);
-        process.exit(1);
+    // Test Pinecone connection
+    const config = {
+      vector_store: {
+        provider: "pinecone",
+        config: {
+          api_key: process.env.PINECONE_API_KEY,
+          environment: process.env.PINECONE_ENVIRONMENT,
+          index: process.env.PINECONE_INDEX
+        }
+      },
+      llm: {
+        provider: "openai",
+        config: {
+          api_key: process.env.OPENAI_API_KEY,
+          model: "gpt-4o-mini"
+        }
       }
-      
-      console.log('Qdrant container started successfully!');
-      console.log('Container ID:', stdout.trim());
-      console.log('\nSetup complete! Your memory system is ready to use.');
-      console.log('\nTo use the memory system:');
-      console.log('1. Make sure your .env file contains all required variables (see .env.example)');
-      console.log('2. Start your server: npm run dev');
-    });
-  });
-});
+    };
+    
+    const memory = Memory.from_config(config);
+    
+    // Test storing a simple memory
+    const testResult = await memory.add(
+      [{ role: "system", content: "This is a test memory for setup verification." }], 
+      "setup-test-user"
+    );
+    
+    console.log('Memory system test successful!');
+    console.log(`Test memory ID: ${testResult.id}`);
+    console.log('\nSetup complete! Your memory system is ready to use.');
+    console.log('\nTo start your server:');
+    console.log('npm run dev');
+    
+    // Clean up test memory
+    await memory.delete(testResult.id);
+    
+  } catch (error) {
+    console.error('Error setting up memory system:');
+    console.error(error);
+    process.exit(1);
+  }
+}
+
+setupMemory();

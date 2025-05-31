@@ -2,20 +2,21 @@ const { Memory } = require('mem0ai');
 const moment = require('moment');
 const { v4: uuidv4 } = require('uuid');
 
-// Initialize Mem0 Memory with Qdrant for persistent storage
+// Initialize Mem0 Memory with Pinecone
 const config = {
   vector_store: {
-    provider: "qdrant",
+    provider: "pinecone",
     config: {
-      host: process.env.QDRANT_HOST || "localhost",
-      port: process.env.QDRANT_PORT || 6333,
+      api_key: process.env.PINECONE_API_KEY,
+      environment: process.env.PINECONE_ENVIRONMENT,
+      index: process.env.PINECONE_INDEX
     }
   },
   llm: {
     provider: "openai",
     config: {
       api_key: process.env.OPENAI_API_KEY,
-      model: "gpt-4o"
+      model: "gpt-4o-mini"
     }
   }
 };
@@ -25,8 +26,16 @@ let memoryInstance = null;
 
 const initializeMemory = async () => {
   if (!memoryInstance) {
-    memoryInstance = Memory.from_config(config);
-    console.log("Memory system initialized successfully");
+    try {
+      memoryInstance = Memory.from_config(config);
+      console.log("Memory system initialized successfully");
+    } catch (error) {
+      console.error("Error initializing memory system:", error);
+      console.log("Falling back to in-memory storage");
+      
+      // Fallback to in-memory storage if Pinecone setup fails
+      memoryInstance = new Memory();
+    }
   }
   return memoryInstance;
 };
@@ -87,7 +96,8 @@ const memoryManager = {
       return result;
     } catch (error) {
       console.error('Error storing conversation in memory:', error);
-      throw error;
+      // Return a mock result if memory storage fails
+      return { id: uuidv4(), success: false, error: error.message };
     }
   },
   
@@ -136,7 +146,7 @@ const memoryManager = {
       return await memory.update(memoryId, newData);
     } catch (error) {
       console.error(`Error updating memory ${memoryId}:`, error);
-      throw error;
+      return { id: memoryId, success: false, error: error.message };
     }
   },
   
@@ -160,7 +170,7 @@ const memoryManager = {
       return true;
     } catch (error) {
       console.error(`Error deleting memories for user ${userId}:`, error);
-      throw error;
+      return false;
     }
   }
 };
@@ -263,7 +273,12 @@ const sessionManager = {
       return sessionSummary;
     } catch (error) {
       console.error(`Error ending session ${sessionId}:`, error);
-      throw error;
+      sessionManager.activeSessions.delete(sessionId);
+      return { 
+        sessionId,
+        error: error.message,
+        success: false
+      };
     }
   }
 };
