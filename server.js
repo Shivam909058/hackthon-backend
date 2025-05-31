@@ -7,10 +7,10 @@ dotenv.config();
 
 const app = express();
 
-// Configure CORS to allow requests from your frontend domain
+// Update CORS to allow requests from your frontend domain
 app.use(cors({
-  origin: ['http://localhost:3000', 'https://hackthon-frontend-tau.vercel.app'],
-  methods: ['GET', 'POST'],
+  origin: ["https://hackthon-frontend-tau.vercel.app", "http://localhost:3000"],
+  methods: ["GET", "POST"],
   credentials: true
 }));
 app.use(express.json());
