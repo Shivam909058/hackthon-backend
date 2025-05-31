@@ -1,5 +1,6 @@
 const dotenv = require('dotenv');
 const { Memory } = require('mem0ai');
+const { v4: uuidv4 } = require('uuid');
 
 dotenv.config();
 
@@ -49,6 +50,9 @@ async function setupMemory() {
     
     const memory = Memory.from_config(config);
     
+    // Test basic Pinecone functionality
+    console.log('Testing basic memory functionality...');
+    
     // Test storing a simple memory
     const testResult = await memory.add(
       [{ role: "system", content: "This is a test memory for setup verification." }], 
@@ -64,11 +68,70 @@ async function setupMemory() {
     // Clean up test memory
     await memory.delete(testResult.id);
     
+    // Now test conversation memory specifically
+    const conversationMemoryWorking = await testConversationMemory(memory);
+    if (conversationMemoryWorking) {
+      console.log('Conversation memory is working correctly - your agent will be stateful!');
+    } else {
+      console.log('⚠️ Conversation memory test failed - your agent may not maintain state correctly');
+    }
+    
   } catch (error) {
     console.error('Error setting up memory system:');
     console.error(error);
     process.exit(1);
   }
+}
+
+// Test storing and retrieving conversation history
+async function testConversationMemory(memory) {
+  console.log('Testing conversation history storage and retrieval...');
+  
+  const testUserId = "test-conversation-user";
+  const testSessionId = uuidv4();
+  
+  // Sample conversation
+  const testConversation = [
+    { role: "user", content: "Hello Mom, can you help me cook something?", timestamp: Date.now() - 5000 },
+    { role: "assistant", content: "Of course, beta! What would you like to make today?", timestamp: Date.now() - 4000 },
+    { role: "user", content: "I want to make butter chicken", timestamp: Date.now() - 3000 },
+    { role: "assistant", content: "Great choice! Let's make butter chicken. Do you have all the ingredients ready?", timestamp: Date.now() - 2000 },
+    { role: "user", content: "Yes, I have everything", timestamp: Date.now() - 1000 }
+  ];
+  
+  // Store the conversation
+  const result = await memory.add(
+    testConversation,
+    testUserId,
+    {
+      sessionId: testSessionId,
+      conversationType: 'chat_history',
+      messageCount: testConversation.length,
+      timeContext: {
+        timestamp: Date.now(),
+        iso: new Date().toISOString()
+      }
+    }
+  );
+  
+  console.log(`Stored test conversation with ID: ${result.id}`);
+  
+  // Retrieve the conversation
+  const searchResult = await memory.search("butter chicken", testUserId);
+  
+  if (searchResult.length > 0) {
+    console.log('Successfully retrieved conversation about butter chicken!');
+    console.log(`Found ${searchResult.length} relevant memories`);
+    console.log('✅ Conversation memory storage and retrieval is working correctly');
+  } else {
+    console.log('⚠️ Could not retrieve the test conversation. Memory retrieval may not be working correctly.');
+  }
+  
+  // Clean up
+  await memory.delete_all(testUserId);
+  console.log('Cleaned up test conversation data');
+  
+  return searchResult.length > 0;
 }
 
 setupMemory();

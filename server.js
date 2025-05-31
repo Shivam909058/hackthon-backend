@@ -101,13 +101,38 @@ app.post("/api/store-conversation", async (req, res) => {
     // Update session with interaction
     sessionManager.updateSession(sessionId);
     
-    // Store conversation in memory
+    // Process messages for time-based reminders
+    const lastUserMessage = messages.find(m => m.role === 'user')?.content;
+    if (lastUserMessage) {
+      // Check for reminder requests in user message
+      checkForReminderRequests(sessionId, userId, lastUserMessage);
+    }
+    
+    // Check for pending reminders
+    const pendingReminders = timeContextManager.getPendingReminders(sessionId);
+    
+    // Store individual messages as conversation memory
     const timeContext = timeContextManager.getCurrentTimeContext();
     const result = await memoryManager.storeConversation(userId, messages, {
       sessionId,
       timeContext,
       conversationId: uuidv4()
     });
+    
+    // Also store the complete chat history to maintain state
+    // This helps the agent remember the entire conversation flow
+    // Get existing conversation history
+    let conversationHistory = await memoryManager.getConversationHistory(userId, 100);
+    
+    // Add new messages to history
+    messages.forEach(message => {
+      // Add timestamp to message
+      message.timestamp = Date.now();
+      conversationHistory.push(message);
+    });
+    
+    // Store updated history
+    await memoryManager.storeCompleteChatHistory(userId, conversationHistory, sessionId);
     
     // Update session with memory ID
     const updatedSession = sessionManager.updateSession(sessionId, {
@@ -117,11 +142,95 @@ app.post("/api/store-conversation", async (req, res) => {
     res.json({
       success: true,
       memoryId: result.id,
-      session: updatedSession
+      session: updatedSession,
+      pendingReminders: pendingReminders,
+      historyCount: conversationHistory.length
     });
   } catch (error) {
     console.error("Error storing conversation:", error);
     res.status(500).json({ error: "Failed to store conversation" });
+  }
+});
+
+// Function to extract and set time-based reminders from user messages
+function checkForReminderRequests(sessionId, userId, message) {
+  // Pattern 1: "Remind me in X seconds/minutes/hours to do [task]"
+  const reminderPattern1 = /remind me in (\d+) (second|seconds|minute|minutes|hour|hours) to (.*)/i;
+  // Pattern 2: "X seconds/minutes/hours ke baad yaad dila dena [task]"
+  const reminderPattern2 = /(\d+) (second|seconds|minute|minutes|hour|hours) ke baad yaad dila dena (.*)/i;
+  // Pattern 3: "X seconds/minutes/hours baad [task] yaad dila dena"
+  const reminderPattern3 = /(\d+) (second|seconds|minute|minutes|hour|hours) baad (.*) yaad dila dena/i;
+  
+  let match = message.match(reminderPattern1) || message.match(reminderPattern2) || message.match(reminderPattern3);
+  
+  if (match) {
+    const amount = parseInt(match[1]);
+    const unit = match[2].toLowerCase();
+    const task = match[3];
+    
+    let durationInSeconds = amount;
+    if (unit.includes('minute')) {
+      durationInSeconds = amount * 60;
+    } else if (unit.includes('hour')) {
+      durationInSeconds = amount * 60 * 60;
+    }
+    
+    console.log(`Setting reminder: ${task} in ${durationInSeconds} seconds`);
+    
+    // Set the reminder
+    timeContextManager.setReminder(sessionId, userId, task, durationInSeconds, (reminder) => {
+      console.log(`Reminder triggered: ${reminder.task}`);
+      // The triggered reminder will be picked up by the next API call
+    });
+  }
+}
+
+// Check for pending reminders
+app.get("/api/check-reminders", (req, res) => {
+  try {
+    const { sessionId } = req.query;
+    
+    if (!sessionId) {
+      return res.status(400).json({ error: "Missing sessionId" });
+    }
+    
+    const pendingReminders = timeContextManager.getPendingReminders(sessionId);
+    
+    // Mark all retrieved reminders as completed
+    pendingReminders.forEach(reminder => {
+      timeContextManager.completeReminder(reminder.id);
+    });
+    
+    res.json({
+      pendingReminders,
+      currentTime: timeContextManager.getCurrentTimeContext()
+    });
+  } catch (error) {
+    console.error("Error checking reminders:", error);
+    res.status(500).json({ error: "Failed to check reminders" });
+  }
+});
+
+// Create a reminder
+app.post("/api/set-reminder", (req, res) => {
+  try {
+    const { sessionId, userId, task, durationInSeconds } = req.body;
+    
+    if (!sessionId || !userId || !task || !durationInSeconds) {
+      return res.status(400).json({ error: "Missing required parameters" });
+    }
+    
+    const reminder = timeContextManager.setReminder(sessionId, userId, task, durationInSeconds, () => {
+      console.log(`Reminder triggered: ${task}`);
+    });
+    
+    res.json({
+      success: true,
+      reminder
+    });
+  } catch (error) {
+    console.error("Error setting reminder:", error);
+    res.status(500).json({ error: "Failed to set reminder" });
   }
 });
 
@@ -213,9 +322,14 @@ app.post("/api/keep-alive", (req, res) => {
       return res.status(404).json({ error: "Session not found" });
     }
     
+    // Check for pending reminders
+    const pendingReminders = timeContextManager.getPendingReminders(sessionId);
+    
     res.json({
       success: true,
-      session
+      session,
+      pendingReminders,
+      currentTime: timeContextManager.getCurrentTimeContext()
     });
   } catch (error) {
     console.error("Error in keep-alive:", error);
@@ -234,6 +348,72 @@ app.get("/api/getAgentId", (req, res) => {
 // Health check endpoint
 app.get("/health", (req, res) => {
   res.status(200).json({ status: "ok" });
+});
+
+// Get conversation history for contextual awareness
+app.get("/api/conversation-history/:userId", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const limit = req.query.limit ? parseInt(req.query.limit) : 20;
+    
+    if (!userId) {
+      return res.status(400).json({ error: "Missing userId" });
+    }
+    
+    // Get conversation history
+    const history = await memoryManager.getConversationHistory(userId, limit);
+    
+    res.json({
+      history,
+      currentTime: timeContextManager.getCurrentTimeContext()
+    });
+  } catch (error) {
+    console.error("Error retrieving conversation history:", error);
+    res.status(500).json({ error: "Failed to retrieve conversation history" });
+  }
+});
+
+// Check agent stateful status
+app.get("/api/check-stateful", async (req, res) => {
+  try {
+    const { userId } = req.query;
+    
+    if (!userId) {
+      return res.status(400).json({ error: "Missing userId parameter" });
+    }
+    
+    // Try to initialize memory
+    await memoryManager.initializeMemory();
+    
+    // Get conversation history
+    const history = await memoryManager.getConversationHistory(userId, 5);
+    
+    // Get all memories
+    const allMemories = await memoryManager.getAllUserMemories(userId);
+    
+    // Check if we can retrieve time-based information
+    const timeContext = timeContextManager.getCurrentTimeContext();
+    
+    res.json({
+      status: "success",
+      statefulStatus: {
+        hasMemory: allMemories.length > 0,
+        hasConversationHistory: history.length > 0,
+        memoryCount: allMemories.length,
+        historyMessageCount: history.length,
+        timeAwareness: timeContext,
+        isFullyStateful: allMemories.length > 0 && timeContext.timestamp > 0
+      },
+      sampleMemories: allMemories.slice(0, 2),
+      sampleHistory: history.slice(0, 3)
+    });
+  } catch (error) {
+    console.error("Error checking stateful status:", error);
+    res.status(500).json({ 
+      error: "Failed to check stateful status",
+      details: error.message
+    });
+  }
 });
 
 const PORT = process.env.PORT || 3000;

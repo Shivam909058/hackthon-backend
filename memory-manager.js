@@ -40,8 +40,11 @@ const initializeMemory = async () => {
   return memoryInstance;
 };
 
-// Time context manager
+// Time context manager with reminder functionality
 const timeContextManager = {
+  // Store active reminders
+  activeReminders: new Map(),
+  
   getCurrentTimeContext: () => {
     const now = moment();
     return {
@@ -71,6 +74,92 @@ const timeContextManager = {
       hours: Math.floor(duration.asHours()),
       humanReadable: duration.humanize()
     };
+  },
+  
+  // Set a reminder for a future time
+  setReminder: (sessionId, userId, task, durationInSeconds, callback) => {
+    const reminderId = uuidv4();
+    const now = moment();
+    const reminderTime = now.add(durationInSeconds, 'seconds');
+    
+    console.log(`Setting reminder for ${durationInSeconds} seconds from now`);
+    
+    const reminder = {
+      id: reminderId,
+      sessionId,
+      userId,
+      task,
+      createdAt: now.valueOf(),
+      reminderTime: reminderTime.valueOf(),
+      durationInSeconds,
+      isCompleted: false,
+      wasTriggered: false
+    };
+    
+    // Store the reminder
+    timeContextManager.activeReminders.set(reminderId, reminder);
+    
+    // Set the timeout to trigger the reminder
+    const timeoutId = setTimeout(() => {
+      const reminderToTrigger = timeContextManager.activeReminders.get(reminderId);
+      if (reminderToTrigger && !reminderToTrigger.isCompleted) {
+        reminderToTrigger.wasTriggered = true;
+        timeContextManager.activeReminders.set(reminderId, reminderToTrigger);
+        
+        console.log(`Triggering reminder: ${task}`);
+        
+        // Execute the callback function when the timer completes
+        if (callback && typeof callback === 'function') {
+          callback(reminderToTrigger);
+        }
+      }
+    }, durationInSeconds * 1000);
+    
+    // Store the timeout ID so we can clear it if needed
+    reminder.timeoutId = timeoutId;
+    timeContextManager.activeReminders.set(reminderId, reminder);
+    
+    return reminder;
+  },
+  
+  // Check if there are any pending reminders for a session
+  getPendingReminders: (sessionId) => {
+    const now = moment().valueOf();
+    const pendingReminders = [];
+    
+    timeContextManager.activeReminders.forEach((reminder) => {
+      if (reminder.sessionId === sessionId && 
+          !reminder.isCompleted && 
+          reminder.reminderTime <= now &&
+          reminder.wasTriggered) {
+        pendingReminders.push(reminder);
+      }
+    });
+    
+    return pendingReminders;
+  },
+  
+  // Mark a reminder as completed
+  completeReminder: (reminderId) => {
+    const reminder = timeContextManager.activeReminders.get(reminderId);
+    if (reminder) {
+      reminder.isCompleted = true;
+      timeContextManager.activeReminders.set(reminderId, reminder);
+      return true;
+    }
+    return false;
+  },
+  
+  // Clear all reminders for a session
+  clearSessionReminders: (sessionId) => {
+    timeContextManager.activeReminders.forEach((reminder, id) => {
+      if (reminder.sessionId === sessionId) {
+        if (reminder.timeoutId) {
+          clearTimeout(reminder.timeoutId);
+        }
+        timeContextManager.activeReminders.delete(id);
+      }
+    });
   }
 };
 
@@ -172,6 +261,62 @@ const memoryManager = {
       console.error(`Error deleting memories for user ${userId}:`, error);
       return false;
     }
+  },
+  
+  // Store complete chat history
+  storeCompleteChatHistory: async (userId, messages, sessionId) => {
+    try {
+      const memory = await initializeMemory();
+      
+      // Add time context and enhanced metadata
+      const timeContext = timeContextManager.getCurrentTimeContext();
+      const metadata = {
+        sessionId,
+        timeContext,
+        conversationType: 'chat_history',
+        messageCount: messages.length
+      };
+      
+      // Store the entire conversation history
+      const result = await memory.add(messages, userId, metadata);
+      
+      console.log(`Stored complete chat history for user ${userId} with ${messages.length} messages`);
+      return result;
+    } catch (error) {
+      console.error('Error storing chat history in memory:', error);
+      return { id: uuidv4(), success: false, error: error.message };
+    }
+  },
+  
+  // Get conversation history
+  getConversationHistory: async (userId, limit = 20) => {
+    try {
+      const memory = await initializeMemory();
+      
+      // Search for conversation history
+      const query = "conversation history";
+      const memories = await memory.search(query, userId, limit);
+      
+      // Extract messages from memories
+      let allMessages = [];
+      memories.forEach(mem => {
+        if (mem.messages && Array.isArray(mem.messages)) {
+          allMessages = [...allMessages, ...mem.messages];
+        }
+      });
+      
+      // Sort by timestamp if available
+      allMessages.sort((a, b) => {
+        const timeA = a.timestamp || 0;
+        const timeB = b.timestamp || 0;
+        return timeA - timeB;
+      });
+      
+      return allMessages;
+    } catch (error) {
+      console.error('Error retrieving conversation history:', error);
+      return [];
+    }
   }
 };
 
@@ -188,7 +333,8 @@ const sessionManager = {
       startTime,
       lastActiveTime: startTime,
       interactions: 0,
-      memoryIds: []
+      memoryIds: [],
+      timeContext: timeContextManager.getCurrentTimeContext()
     });
     
     return {
@@ -207,7 +353,8 @@ const sessionManager = {
     const updatedSession = {
       ...session,
       ...updates,
-      lastActiveTime: Date.now()
+      lastActiveTime: Date.now(),
+      timeContext: timeContextManager.getCurrentTimeContext()
     };
     
     // Increment interactions count if not specified in updates
@@ -230,7 +377,8 @@ const sessionManager = {
     return {
       ...session,
       duration,
-      currentTime: timeContextManager.getCurrentTimeContext()
+      currentTime: timeContextManager.getCurrentTimeContext(),
+      pendingReminders: timeContextManager.getPendingReminders(sessionId)
     };
   },
   
@@ -241,6 +389,9 @@ const sessionManager = {
     
     const session = sessionManager.activeSessions.get(sessionId);
     const duration = timeContextManager.getSessionDuration(session.startTime);
+    
+    // Clear any active reminders for this session
+    timeContextManager.clearSessionReminders(sessionId);
     
     // Store session summary in memory
     try {
