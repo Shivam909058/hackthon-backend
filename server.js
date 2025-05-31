@@ -4,6 +4,7 @@ const dotenv = require("dotenv");
 const path = require("path");
 const { v4: uuidv4 } = require("uuid");
 const { memoryManager, sessionManager, timeContextManager } = require("./memory-manager");
+const delayHandler = require('./delay-handler');
 
 dotenv.config();
 
@@ -265,6 +266,8 @@ app.post("/api/end-session", async (req, res) => {
       return res.status(400).json({ error: "Missing sessionId" });
     }
     
+    console.log(`Ending session: ${sessionId}`);
+    
     // End the session and get summary
     const summary = await sessionManager.endSession(sessionId);
     
@@ -274,6 +277,9 @@ app.post("/api/end-session", async (req, res) => {
     
     // Remove from active conversations
     activeConversations.delete(sessionId);
+    
+    // Clear any active reminders for this session
+    timeContextManager.clearSessionReminders(sessionId);
     
     res.json({
       success: true,
@@ -414,6 +420,127 @@ app.get("/api/check-stateful", async (req, res) => {
       details: error.message
     });
   }
+});
+
+// Create a delay (for waiting before response)
+app.post("/api/create-delay", (req, res) => {
+  try {
+    const { sessionId, delaySeconds, message } = req.body;
+    
+    if (!sessionId || !delaySeconds) {
+      return res.status(400).json({ error: "Missing required parameters" });
+    }
+    
+    // Create the delay
+    const delay = delayHandler.createDelay(sessionId, delaySeconds);
+    
+    // Store the message that will be sent after the delay
+    if (message) {
+      delay.message = message;
+    }
+    
+    res.json({
+      success: true,
+      delay
+    });
+  } catch (error) {
+    console.error("Error creating delay:", error);
+    res.status(500).json({ error: "Failed to create delay" });
+  }
+});
+
+// Check if session has active delay
+app.get("/api/check-delay", (req, res) => {
+  try {
+    const { sessionId } = req.query;
+    
+    if (!sessionId) {
+      return res.status(400).json({ error: "Missing sessionId parameter" });
+    }
+    
+    const hasDelay = delayHandler.hasActiveDelay(sessionId);
+    const remainingSeconds = delayHandler.getRemainingDelayTime(sessionId);
+    
+    res.json({
+      hasActiveDelay: hasDelay,
+      remainingSeconds: remainingSeconds
+    });
+  } catch (error) {
+    console.error("Error checking delay:", error);
+    res.status(500).json({ error: "Failed to check delay" });
+  }
+});
+
+// Process message for delays
+app.post("/api/process-message", (req, res) => {
+  try {
+    const { sessionId, message } = req.body;
+    
+    if (!sessionId || !message) {
+      return res.status(400).json({ error: "Missing required parameters" });
+    }
+    
+    // Process the message for delay instructions
+    const result = delayHandler.processDelayInstructions(message);
+    
+    if (result.hasDelay) {
+      // Create a delay
+      delayHandler.createDelay(sessionId, result.delaySeconds);
+    }
+    
+    res.json({
+      success: true,
+      hasDelay: result.hasDelay,
+      delaySeconds: result.delaySeconds
+    });
+  } catch (error) {
+    console.error("Error processing message:", error);
+    res.status(500).json({ error: "Failed to process message" });
+  }
+});
+
+// Add this middleware to patch the system prompt for better time handling
+app.use(async (req, res, next) => {
+  // Only intercept requests to ElevenLabs API
+  if (req.path.includes('/api/signed-url')) {
+    // Store the original send function
+    const originalSend = res.send;
+    
+    // Override the send function
+    res.send = function(body) {
+      try {
+        // Parse the response body
+        const data = JSON.parse(body);
+        
+        // If it has a signed URL, add our time handling instructions
+        if (data.signedUrl) {
+          console.log('Adding time handling instructions to agent system prompt');
+          
+          // Store the modified URL
+          res.locals.patchedUrl = data.signedUrl;
+          
+          // You'll need to implement a way to patch the ElevenLabs system prompt
+          // This might require a proxy or a custom implementation
+        }
+      } catch (error) {
+        console.error('Error patching system prompt:', error);
+      }
+      
+      // Call the original send function
+      return originalSend.call(this, body);
+    };
+  }
+  
+  next();
+});
+
+// Add this endpoint to handle errors more gracefully
+app.use((req, res, next) => {
+  res.status(404).json({
+    error: "Endpoint not found",
+    path: req.path,
+    method: req.method
+  });
 });
 
 const PORT = process.env.PORT || 3000;
