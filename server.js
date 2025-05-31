@@ -15,8 +15,14 @@ app.use(cors({
 }));
 app.use(express.json());
 
+// Add session tracking
+const activeSessions = new Map();
+
 app.get("/api/signed-url", async (req, res) => {
   try {
+    // Generate a unique session ID for this request
+    const sessionId = req.query.sessionId || Date.now().toString();
+    
     const response = await fetch(
       `https://api.elevenlabs.io/v1/convai/conversation/get_signed_url?agent_id=${process.env.AGENT_ID}`,
       {
@@ -32,11 +38,49 @@ app.get("/api/signed-url", async (req, res) => {
     }
 
     const data = await response.json();
-    res.json({ signedUrl: data.signed_url });
+    
+    // Track this session
+    activeSessions.set(sessionId, {
+      lastActive: Date.now(),
+      signedUrl: data.signed_url
+    });
+    
+    // Include session ID in response
+    res.json({ 
+      signedUrl: data.signed_url,
+      sessionId: sessionId
+    });
   } catch (error) {
     console.error("Error:", error);
     res.status(500).json({ error: "Failed to get signed URL" });
   }
+});
+
+// Session keep-alive endpoint
+app.post("/api/keep-alive", (req, res) => {
+  const { sessionId } = req.body;
+  
+  if (!sessionId || !activeSessions.has(sessionId)) {
+    return res.status(404).json({ error: "Session not found" });
+  }
+  
+  // Update last active timestamp
+  const session = activeSessions.get(sessionId);
+  session.lastActive = Date.now();
+  activeSessions.set(sessionId, session);
+  
+  res.json({ status: "ok" });
+});
+
+// End session endpoint
+app.post("/api/end-session", (req, res) => {
+  const { sessionId } = req.body;
+  
+  if (sessionId && activeSessions.has(sessionId)) {
+    activeSessions.delete(sessionId);
+  }
+  
+  res.json({ status: "ok" });
 });
 
 //API route for getting Agent ID, used for public agents
